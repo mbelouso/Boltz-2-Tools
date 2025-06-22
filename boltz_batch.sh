@@ -4,7 +4,8 @@
 
 for i in *.yaml;
     do
-        boltz predict $i > {$i}.log
+        prefix=$(basename "$i" .yaml)
+        boltz predict "$i" > "${prefix}.log"
 done
 
 echo "All calculations completed comrade"
