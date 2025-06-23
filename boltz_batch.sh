@@ -5,7 +5,7 @@
 for i in *.yaml;
     do
         prefix=$(basename "$i" .yaml)
-        boltz predict "$i" > "${prefix}.log"
+        boltz predict "$i" --use_msa_server > "${prefix}.log"
 done
 
 echo "All calculations completed comrade"
