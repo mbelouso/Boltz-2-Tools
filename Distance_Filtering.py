@@ -100,8 +100,8 @@ for file in combined_df['model_path'].unique():
 distance_filtered_dir = 'distance_filtered'
 os.makedirs(distance_filtered_dir, exist_ok=True)
 
-# Initialize a DataFrame to store distance matrices
-distance_df = pd.DataFrame()
+# Initialize a list to store distance matrices and filenames
+distance_data = []
 
 for file in os.listdir(output_dir):  # Iterate over files in the output directory
     file_path = os.path.join(output_dir, file)  # Construct the full path to the file
@@ -114,8 +114,8 @@ for file in os.listdir(output_dir):  # Iterate over files in the output director
         Lig_COM = centre_of_mass(Lig_positions)
         distances = calculate_distance_matrix(CA_positions, Lig_COM)
 
-        # Add distances to the DataFrame with the filename as the index
-        distance_df[file] = distances
+        # Append the distances and filename to the list
+        distance_data.append(pd.Series(distances, name=file))
 
         if filter_by_sites(distances, binding_site_residue1, binding_site_residue2, binding_site_residue3, distance_threshold)[0]:
             # If the distances pass the filter, copy the file to the distance_filtered_dir
@@ -124,10 +124,15 @@ for file in os.listdir(output_dir):  # Iterate over files in the output director
     except FileNotFoundError as e:
         print(f"Error processing file {file_path}: {e}")
 
+# Combine all the distance data into a single DataFrame using pd.concat
+distance_df = pd.concat(distance_data, axis=1).transpose()
 
 # Save the DataFrame to a CSV file for later plotting
 distance_df.to_csv('distance_matrices.csv', index=True)
 print("Distance matrices saved to 'distance_matrices.csv'")
+
+print("/n Boltz-2-Tools Distance Filtering Complete!/n")
+print("/n Zipping Results for Sharing!/n")
 
 # Save Data and zip results for sharing:
 
@@ -150,23 +155,14 @@ shutil.copytree('distance_filtered', distance_filtered_path, dirs_exist_ok=True)
 
 # Copy the filtered_models directory to the temporary directory
 filtered_models_path = os.path.join(temp_dir, 'filtered_models')
-shutil.copytree('filtered_models', filtered_models_path, dirs_exist_ok=True)
-
-# Copy the combined_models directory to the temporary directory
+# Copy the combined_models directory to the temporary directoryxist_ok=True)
 combined_models_path = os.path.join(temp_dir, 'combined_models')
 shutil.copytree('combined_models', combined_models_path, dirs_exist_ok=True)
-
-# Create the archive with the updated contents
+combined_models_path = os.path.join(temp_dir, 'combined_models')
+# Create the archive with the updated contentsdels_path, dirs_exist_ok=True)
 shutil.make_archive(archive_name, 'zip', temp_dir)
-
-# Clean up the temporary directory
+# Create the archive with the updated contents
+# Clean up the temporary directory'zip', temp_dir)
 shutil.rmtree(temp_dir)
-
-
+# Clean up the temporary directory
 print("Results Filtered and Collated comrade")
-
-
-
-
-
-
