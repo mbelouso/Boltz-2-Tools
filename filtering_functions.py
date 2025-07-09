@@ -88,24 +88,45 @@ def combine_csv_results(file_list):
 
 # Function to filter by distance and position. The inputs need to be up to three amino acid positions a distance per amino acid position
 
-def filter_by_sites(distances, site1, site2, site3, distance_thresh):
+def filter_by_sites(distances, site1, site2=None, site3=None, distance_thresh=5.0):
     """
-    Function to filter the dataset by defining 3 CA residue positions and distance threshold
+    Function to filter the dataset by defining 1-3 CA residue positions and distance threshold
 
     Parameters:
     distances (np.array): distances in 1D array
-    site1, site2, site3 (int): refer to the row position and the hence the residue position
+    site1 (int): required - row position and hence the residue position
+    site2, site3 (int, optional): additional site positions
     distance_thresh (float): threshold for filtering by distance
     
-    Returns: Boolean and distances to site
+    Returns: Boolean and distances to site(s)
     """
-    # read np array
+    # Check required site1
+    if distances[site1] >= distance_thresh:
+        return False, distances[site1], None, None
     
-    if distances[site1] < distance_thresh and distances[site2] < distance_thresh and distances[site3] < distance_thresh:
-        return True, distances[site1], distances[site2], distances[site3]
-    else:
-        return False, None, None, None
+    # Build list of valid sites and their distances
+    valid_distances = [distances[site1]]
+    sites_to_check = [site1]
     
+    # Check optional sites
+    if site2 is not None:
+        if distances[site2] >= distance_thresh:
+            return False, distances[site1], distances[site2], None
+        valid_distances.append(distances[site2])
+        sites_to_check.append(site2)
+    
+    if site3 is not None:
+        if distances[site3] >= distance_thresh:
+            return False, distances[site1], distances[site2] if site2 is not None else None, distances[site3]
+        valid_distances.append(distances[site3])
+        sites_to_check.append(site3)
+    
+    # All specified sites pass the threshold
+    return (True, 
+            distances[site1], 
+            distances[site2] if site2 is not None else None, 
+            distances[site3] if site3 is not None else None)
+
 # Utility Functions for calculating Centre of Mass and distances.
 
 def centre_of_mass(coordinates):

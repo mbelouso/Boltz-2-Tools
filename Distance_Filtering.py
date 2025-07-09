@@ -18,10 +18,10 @@ then create a new directory and move the filtered cif file to a distance_filtere
 # Note: the distance array starts at 0, so amino acids numbers from chimerax will be +1
 
 binding_site_residue1 = int(157)
-binding_site_residue2 = int(89)
-binding_site_residue3 = int(211)
-distance_threshold = float(10.0)
-confidence_threshold = float(0.89)
+binding_site_residue2 = None  # You can set this to None if you don't want to filter by a second residue
+binding_site_residue3 = None  # You can set this to None if you don't want to filter by a third residue
+distance_threshold = float(15.0)
+confidence_threshold = float(0.82)
 
 folder_list = os.listdir('./')
 
