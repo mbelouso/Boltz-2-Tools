@@ -8,6 +8,52 @@ import numpy as np
 import modelcif.reader
 import modelcif
 
+def parse_boltz2_results(directory):
+    results = []
+    print(f"Scanning directory: {directory}")  # Debugging statement
+    confidence_files = [f for f in os.listdir(directory) if f.startswith('confidence_') and f.endswith('.json')]
+    print(f"Found confidence files: {confidence_files}")  # Debugging statement
+
+    for conf_file in confidence_files:
+        model_index = conf_file.split('_')[-1].split('.')[0]  # Extract model index from filename
+        base_name = '_'.join(conf_file.split('_')[1:-2])
+        confidence_data = json.load(open(os.path.join(directory, conf_file), 'r'))  # Load the JSON data
+
+        # Find the corresponding model file dynamically based on the confidence file name
+        base_name = conf_file.replace('confidence_', '').replace(f'_model_{model_index}.json', '')
+        model_file = f"{base_name}_model_{model_index}.cif"
+        model_path = os.path.join(directory, model_file)
+        print(f"Constructed model path: {model_path}")  # Debugging statement
+
+        if os.path.exists(model_path):
+            print(f"Model file exists: {model_path}")  # Debugging statement
+            results.append({
+                'model_path': model_path,
+                'model_index': model_index,
+                'confidence_score': confidence_data['confidence_score'],
+                'ptm': confidence_data['ptm'],
+                'iptm': confidence_data['iptm'],
+                'ligand_iptm': confidence_data['ligand_iptm'],
+                'protein_iptm': confidence_data['protein_iptm'],
+                'complex_plddt': confidence_data['complex_plddt'],
+                'complex_iplddt': confidence_data['complex_iplddt'],
+                'complex_pde': confidence_data['complex_pde'],
+                'complex_ipde': confidence_data['complex_ipde'],
+                'chains_ptm': confidence_data['chains_ptm'],
+                'pair_chains_iptm': confidence_data['pair_chains_iptm']  
+            })
+        else:
+            print(f"Model file does not exist: {model_path}")  # Debugging statement
+
+    return pd.DataFrame(results)
+
+# Function to combine the CSV results from multiple files:
+def combine_csv_results(file_list):
+    combined_df = pd.concat([pd.read_csv(f) for f in file_list if f.endswith('_results.csv')])
+    return combined_df
+
+
+
 def extract_coordinates(file_path, target_atom_id=None, target_asym_unit_id=None):
     # Open the CIF file and pass the file handle to the reader
     with open(file_path, 'r') as fh:
@@ -88,45 +134,24 @@ def combine_csv_results(file_list):
 
 # Function to filter by distance and position. The inputs need to be up to three amino acid positions a distance per amino acid position
 
-def filter_by_sites(distances, site1, site2=None, site3=None, distance_thresh=5.0):
+def filter_by_sites(distances, site1, site2, site3, distance_thresh):
     """
-    Function to filter the dataset by defining 1-3 CA residue positions and distance threshold
+    Function to filter the dataset by defining 3 CA residue positions and distance threshold
 
     Parameters:
     distances (np.array): distances in 1D array
-    site1 (int): required - row position and hence the residue position
-    site2, site3 (int, optional): additional site positions
+    site1, site2, site3 (int): refer to the row position and the hence the residue position
     distance_thresh (float): threshold for filtering by distance
     
-    Returns: Boolean and distances to site(s)
+    Returns: Boolean and distances to site
     """
-    # Check required site1
-    if distances[site1] >= distance_thresh:
-        return False, distances[site1], None, None
+    # read np array
     
-    # Build list of valid sites and their distances
-    valid_distances = [distances[site1]]
-    sites_to_check = [site1]
+    if distances[site1] < distance_thresh and distances[site2] < distance_thresh and distances[site3] < distance_thresh:
+        return True, distances[site1], distances[site2], distances[site3]
+    else:
+        return False, None, None, None
     
-    # Check optional sites
-    if site2 is not None:
-        if distances[site2] >= distance_thresh:
-            return False, distances[site1], distances[site2], None
-        valid_distances.append(distances[site2])
-        sites_to_check.append(site2)
-    
-    if site3 is not None:
-        if distances[site3] >= distance_thresh:
-            return False, distances[site1], distances[site2] if site2 is not None else None, distances[site3]
-        valid_distances.append(distances[site3])
-        sites_to_check.append(site3)
-    
-    # All specified sites pass the threshold
-    return (True, 
-            distances[site1], 
-            distances[site2] if site2 is not None else None, 
-            distances[site3] if site3 is not None else None)
-
 # Utility Functions for calculating Centre of Mass and distances.
 
 def centre_of_mass(coordinates):
