@@ -10,4 +10,6 @@ matplotlib
 seaborn
 biopython
 modelcif
+biotite
+
 

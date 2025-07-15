@@ -6,7 +6,7 @@
 #SBATCH --job-name=boltz_abinit
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=16
+#SBATCH --cpus-per-task=8
 #SBATCH --partition=normal
 #SBATCH --mem=100GB 
 #SBATCH --time=72:00:00
@@ -36,7 +36,7 @@ fi
 for yaml_file in yaml3/*.yaml; do
     if [ -f "$yaml_file" ]; then
         echo "Processing $yaml_file..."
-        boltz predict "$yaml_file" --use_msa_server --preprocessing-threads 16
+        boltz predict "$yaml_file" --preprocessing-threads 8 --output_format pdb
     fi
 done
 echo "All calculations completed comrade"
