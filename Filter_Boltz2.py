@@ -78,7 +78,7 @@ def parse_arguments():
     parser.add_argument(
         '--probability-binary-value', 
         type=float, 
-        default=0.6,
+        default=0.3,
         help='Minimum affinity probability binary threshold'
     )
     
@@ -133,8 +133,6 @@ def load_config_from_file(config_file):
     except Exception as e:
         logger.error(f"Failed to load config file {config_file}: {e}")
         return {}
-
-
 
 def parse_boltz2_results(directory):
     results = []
