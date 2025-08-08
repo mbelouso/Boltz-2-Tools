@@ -107,9 +107,37 @@ def parse_arguments():
         '--distance-threshold', 
         type=float, 
         default=15.0,
-        help='Distance threshold for binding site filtering (Angstroms)'
+        help='Maximum distance threshold (Angstroms) for binding site filtering'
+    )
+
+    parser.add_argument(
+        '--plot-residue1', 
+        type=int, 
+        default=None, 
+        help='Residue index for distance plot #1'
+    )
+
+    parser.add_argument(
+        '--plot-residue2', 
+        type=int, 
+        default=None, 
+        help='Residue index for distance plot #2'
+    )
+
+    parser.add_argument(
+        '--plot-residue3', 
+        type=int, 
+        default=None, 
+        help='Residue index for distance plot #3'
     )
     
+    parser.add_argument(
+        '--plot-residue4', 
+        type=int, 
+        default=None, 
+        help='Residue index for distance plot #4'
+    )
+
     parser.add_argument(
         '--config-file', 
         type=str, 
@@ -123,34 +151,6 @@ def parse_arguments():
         help='Prefix for output files'
     )
     
-    parser.add_argument(
-        '--plot-residue1', 
-        type=int, 
-        default=157,
-        help='Residue number for distance plot 1'
-    )
-
-    parser.add_argument(
-        '--plot-residue2', 
-        type=int, 
-        default=90,
-        help='Residue number for distance plot 2'
-    )
-
-    parser.add_argument(
-        '--plot-residue3', 
-        type=int, 
-        default=212,
-        help='Residue number for distance plot 3'
-
-    )
-    parser.add_argument(
-        '--plot-residue4', 
-        type=int, 
-        default=57,
-        help='Residue number for distance plot 4'
-    )
-
     return parser.parse_args()
 
 def load_config_from_file(config_file):
@@ -1175,7 +1175,7 @@ class BoltzResultsProcessor:
                 # Extract RMSD values
                 if "RMSD:" in result:
                     try:
-                        rmsd_str = result.split("RMSD: ")[1].split(" Å")[0]
+                        rmsd_str = result.split("RMSD: ")[1]
                         rmsd_values.append(float(rmsd_str))
                     except:
                         continue
@@ -1256,28 +1256,58 @@ class BoltzResultsProcessor:
         """Create distance-related plots."""
         if Path('distance_matrices.csv').exists():
             distance_data = pd.read_csv('distance_matrices.csv')
-            
-            # Specific residue plots
+
+            # Build a map from integer residue IDs -> actual column names in CSV
+            col_map = {}
+            for col in distance_data.columns:
+                # Skip non-distance columns like 'model_path'
+                if col == 'model_path':
+                    continue
+                try:
+                    col_map[int(col)] = col  # headers saved as strings
+                except (ValueError, TypeError):
+                    # If headers are already ints, or not numeric, handle gracefully
+                    if isinstance(col, int):
+                        col_map[col] = col
+
             residues = [
-                self.config.get('plot_residue1', 157),
-                self.config.get('plot_residue2', 90),
-                self.config.get('plot_residue3', 212),
-                self.config.get('plot_residue4', 57)
+                self.config.get('plot_residue1'),
+                self.config.get('plot_residue2'),
+                self.config.get('plot_residue3'),
+                self.config.get('plot_residue4')
             ]
+            residues = [r for r in residues if r is not None]
+
+            if not residues:
+                logger.warning("No valid residues specified for distance plots. Skipping.")
+                return
+
+            plotted = 0
             plt.figure(figsize=(12, 10))
-            
             for i, residue in enumerate(residues, 1):
-                if residue < distance_data.shape[1]:
+                if residue in col_map:
                     plt.subplot(2, 2, i)
-                    sns.histplot(distance_data.iloc[:, residue], bins=50, kde=True)
+                    col_name = col_map[residue]
+                    sns.histplot(distance_data[col_name].dropna(), bins=50, kde=True)
                     plt.title(f'Distribution of Distances to Residue {residue}')
                     plt.xlabel('Distance to Residue (Å)')
                     plt.ylabel('Frequency')
                     plt.grid(True, alpha=0.3)
-            
+                    plotted += 1
+                else:
+                    logger.warning(f"Residue {residue} not found in distance matrix columns. Available numeric columns: "
+                                   f"{sorted(list(col_map.keys()))[:10]}{' ...' if len(col_map)>10 else ''}")
+
+            if plotted == 0:
+                logger.warning("No matching residue columns found. Skipping distance plots.")
+                plt.close()
+                return
+
             plt.tight_layout()
             plt.savefig('distance_distribution_plots.png', dpi=300, bbox_inches='tight')
             plt.close()
+        else:
+            logger.warning("distance_matrices.csv not found. Skipping distance plots.")
     
     def _create_correlation_plots(self) -> None:
         """Create correlation plots."""
@@ -1463,7 +1493,11 @@ def main():
         'binding_site_residue2': args.binding_site_residue2,
         'binding_site_residue3': args.binding_site_residue3,
         'distance_threshold': args.distance_threshold,
-        'output_prefix': args.output_prefix
+        'output_prefix': getattr(args, 'output_prefix', 'boltz_results'),
+        'plot_residue1': args.plot_residue1,
+        'plot_residue2': args.plot_residue2,
+        'plot_residue3': args.plot_residue3,
+        'plot_residue4': args.plot_residue4,
     }
     
     # Override with config file if provided
