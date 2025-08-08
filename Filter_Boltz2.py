@@ -123,6 +123,34 @@ def parse_arguments():
         help='Prefix for output files'
     )
     
+    parser.add_argument(
+        '--plot-residue1', 
+        type=int, 
+        default=157,
+        help='Residue number for distance plot 1'
+    )
+
+    parser.add_argument(
+        '--plot-residue2', 
+        type=int, 
+        default=90,
+        help='Residue number for distance plot 2'
+    )
+
+    parser.add_argument(
+        '--plot-residue3', 
+        type=int, 
+        default=212,
+        help='Residue number for distance plot 3'
+
+    )
+    parser.add_argument(
+        '--plot-residue4', 
+        type=int, 
+        default=57,
+        help='Residue number for distance plot 4'
+    )
+
     return parser.parse_args()
 
 def load_config_from_file(config_file):
@@ -1230,7 +1258,12 @@ class BoltzResultsProcessor:
             distance_data = pd.read_csv('distance_matrices.csv')
             
             # Specific residue plots
-            residues = [157, 90, 212, 57]
+            residues = [
+                self.config.get('plot_residue1', 157),
+                self.config.get('plot_residue2', 90),
+                self.config.get('plot_residue3', 212),
+                self.config.get('plot_residue4', 57)
+            ]
             plt.figure(figsize=(12, 10))
             
             for i, residue in enumerate(residues, 1):
