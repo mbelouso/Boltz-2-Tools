@@ -738,8 +738,12 @@ class BoltzResultsProcessor:
         if not self.pdb_file_list:
             self.collect_pdb_files()
         
+        if not self.pdb_file_list:
+            logger.error("No PDB files found for hydrogen bond analysis.")
+            return pd.DataFrame()
+        
         start_time = time.time()
-        num_processes = min(mp.cpu_count(), len(self.pdb_file_list))
+        num_processes = max(1, min(mp.cpu_count(), len(self.pdb_file_list)))  # Ensure at least 1 process
         
         with mp.Pool(processes=num_processes) as pool:
             results = pool.map(process_hydrogen_bonds, self.pdb_file_list)
@@ -1360,7 +1364,7 @@ class BoltzResultsProcessor:
             'hydrogen_bond_df_shape': self.hydrogen_bond_df.shape if self.hydrogen_bond_df is not None else None,
             'distance_df_shape': self.distance_df.shape if self.distance_df is not None else None,
             'pdb_files_count': len(self.pdb_file_list)
-        }
+        };
         
         # Save summary as JSON
         with open('data_summary.json', 'w') as f:
