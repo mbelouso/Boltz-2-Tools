@@ -716,18 +716,22 @@ class BoltzResultsProcessor:
                 logger.warning(f"File does not exist: {file_path}")
     
     def collect_pdb_files(self) -> List[str]:
-        """Collect all PDB file paths."""
+        """Collect all PDB file paths from both possible prediction subfolders."""
         self.pdb_file_list = []
         folder_list = self.get_boltz_folders()
         
         for folder in folder_list:
-            folder_id = folder.split('_')[2]
-            predictions_folder = Path(folder) / 'predictions' / folder_id
+            # Extract folder ID and full folder name
+            folder_id = folder.split('_', 2)[2]
+            predictions_folder1 = Path(folder) / 'predictions' / folder_id
+            predictions_folder2 = Path(folder) / 'predictions' / folder  # Use full folder name
             
-            if predictions_folder.exists():
-                pdb_files = list(predictions_folder.glob('*.pdb'))
-                self.pdb_file_list.extend([str(f) for f in pdb_files])
-        
+            # Check both possible prediction folders
+            for predictions_folder in [predictions_folder1, predictions_folder2]:
+                if predictions_folder.exists():
+                    pdb_files = list(predictions_folder.glob('*.pdb'))
+                    self.pdb_file_list.extend([str(f) for f in pdb_files])
+    
         logger.info(f"Found {len(self.pdb_file_list)} PDB files to process")
         return self.pdb_file_list
     
