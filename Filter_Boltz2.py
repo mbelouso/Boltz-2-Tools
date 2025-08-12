@@ -43,6 +43,7 @@ import biotite.structure.io.pdb as pdb
 from Bio.PDB import *
 import sys
 import argparse
+import yaml
 
 
 # Configure logging
@@ -162,7 +163,24 @@ def load_config_from_file(config_file):
         logger.error(f"Failed to load config file {config_file}: {e}")
         return {}
 
-
+def get_smiles_from_yaml(base_name):
+    """Search yaml directories for the YAML file and extract the SMILES string."""
+    yaml_dirs = [f"yaml{i}" for i in range(1, 9)] + ["yaml"]
+    for yaml_dir in yaml_dirs:
+        yaml_file = os.path.join(yaml_dir, f"{base_name}.yaml")
+        if os.path.exists(yaml_file):
+            try:
+                with open(yaml_file, "r") as f:
+                    data = yaml.safe_load(f)
+                    # Find the ligand entry in sequences
+                    for entry in data.get('sequences', []):
+                        ligand = entry.get('ligand')
+                        if ligand and 'smiles' in ligand:
+                            return ligand['smiles']
+            except Exception as e:
+                print(f"Error reading {yaml_file}: {e}")
+                return None
+    return None
 
 def parse_boltz2_results(directory):
     results = []
@@ -182,7 +200,6 @@ def parse_boltz2_results(directory):
         try:
             affinity_data = json.load(open(os.path.join(directory, aff_file), 'r'))
             affinity_dict[model_key] = affinity_data
-            #print(f"Loaded affinity data for key: '{model_key}' from file: {aff_file}")  # Debugging statement
         except Exception as e:
             print(f"Error loading affinity file {aff_file}: {e}")
 
@@ -194,20 +211,13 @@ def parse_boltz2_results(directory):
         model_path = os.path.join(directory, model_file)
         model_key = f"{base_name}"  # Key matches affinity file base name
 
-        # Load confidence data
         try:
             confidence_data = json.load(open(os.path.join(directory, conf_file), 'r'))
         except Exception as e:
             print(f"Error loading confidence file {conf_file}: {e}")
             continue
-        
-        #print(f"Processing confidence file: {conf_file}")
-        #print(f"Generated model key: '{model_key}'")
-        #print(f"Constructed model path: {model_path}")  # Debugging statement
 
         if os.path.exists(model_path):
-                        
-            # Create the result dictionary with confidence data
             result_entry = {
                 'model_path': model_path,
                 'model_index': model_index,
@@ -235,9 +245,7 @@ def parse_boltz2_results(directory):
                     'affinity_pred_value2': affinity_data.get('affinity_pred_value2', None),
                     'affinity_probability_binary2': affinity_data.get('affinity_probability_binary2', None)
                 })
-                #print(f"✓ Successfully added affinity data for: {model_key}")  # Debugging statement
             else:
-                # Add None values for affinity data if not available
                 result_entry.update({
                     'affinity_pred_value': None,
                     'affinity_probability_binary': None,
@@ -246,18 +254,18 @@ def parse_boltz2_results(directory):
                     'affinity_pred_value2': None,
                     'affinity_probability_binary2': None
                 })
-                print(f"✗ No affinity data found for: '{model_key}'")  # Debugging statement
-                print(f"  Available keys: {list(affinity_dict.keys())}")
+            
+            # Add SMILES string from YAML (search all yaml dirs)
+            result_entry['smiles'] = get_smiles_from_yaml(base_name)
             
             results.append(result_entry)
-    
         else:
-            print(f"Model file does not exist: {model_path}")  # Debugging statement
+            print(f"Model file does not exist: {model_path}")
 
-    #print(f"\nProcessed {len(results)} models total")
     print(f"Affinity data matched for {sum(1 for r in results if r.get('affinity_pred_value') is not None)} models")
     
     return pd.DataFrame(results)
+
 
 # Function to combine the CSV results from multiple files:
 def combine_csv_results(file_list):

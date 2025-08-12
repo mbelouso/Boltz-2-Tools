@@ -10,6 +10,8 @@ matplotlib
 seaborn
 biopython
 modelcif
-biotite
+rdkit
+
+pip install chembl-webresource-client
 
 
