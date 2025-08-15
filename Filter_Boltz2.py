@@ -41,6 +41,7 @@ import biotite.structure.io as strucio
 import biotite.structure as structure
 import biotite.structure.io.pdb as pdb
 from Bio.PDB import *
+from Bio.PDB.Atom import Atom
 import sys
 import argparse
 import yaml
@@ -150,6 +151,12 @@ def parse_arguments():
         type=str, 
         default='boltz_results',
         help='Prefix for output files'
+    )
+
+    parser.add_argument(
+    '--allow-empty-affinity',
+    action='store_true',
+    help='Allow filtering models even if affinity_pred_value and affinity_probability_binary are missing'
     )
     
     return parser.parse_args()
@@ -616,7 +623,7 @@ def align_structure(pdb_file, reference_ca_coords, directory_to_parse, directory
         
         # Create dummy atoms for reference coordinates (needed for Superimposer)
         # We'll use the coordinates from the reference structure
-        from Bio.PDB.Atom import Atom
+        
         reference_atoms = []
         for i, coord in enumerate(reference_ca_coords):
             atom = Atom('CA', coord, 0, 1, ' ', 'CA', i, 'C')
@@ -1035,22 +1042,14 @@ class BoltzResultsProcessor:
     def filter_results(self) -> pd.DataFrame:
         """Filter results based on all criteria."""
         logger.info("Filtering results based on criteria...")
-        
-        # First, check if we have the required columns
+    
         required_filter_columns = ['num_hbonds', 'distance_to_residue']
         missing_columns = [col for col in required_filter_columns if col not in self.combined_df.columns]
-        
+    
         if missing_columns:
             logger.error(f"Missing required columns for filtering: {missing_columns}")
             return pd.DataFrame()
         
-        # Check for NaN values in filtering columns
-        for col in required_filter_columns:
-            nan_count = self.combined_df[col].isna().sum()
-            if nan_count > 0:
-                logger.warning(f"Column '{col}' has {nan_count} NaN values that will be excluded from filtering")
-        
-        # Create a mask for valid (non-NaN) data
         valid_data_mask = self.combined_df[required_filter_columns].notna().all(axis=1)
         valid_data_count = valid_data_mask.sum()
         
@@ -1060,19 +1059,26 @@ class BoltzResultsProcessor:
             logger.error("No rows with complete data available for filtering!")
             return pd.DataFrame()
         
-        # Apply filters only to rows with valid data
         config = self.config
-        filter_mask = (
-            (self.combined_df['confidence_score'] > config['confidence_value']) &
-            (self.combined_df['affinity_pred_value'] < config['affinity_value']) &
-            (self.combined_df['distance_to_residue'] < config['distance_threshold']) &
-            (self.combined_df['num_hbonds'] > 0) &
-            (self.combined_df['affinity_probability_binary'] > config['probability_binary_value']) &
-            valid_data_mask  # Only consider rows with complete data
-        )
+        # If allow_empty_affinity is set, skip affinity filters if columns are missing or NaN
+        if config.get('allow_empty_affinity', False):
+            filter_mask = (
+                (self.combined_df['confidence_score'] > config['confidence_value']) &
+                (self.combined_df['distance_to_residue'] < config['distance_threshold']) &
+                (self.combined_df['num_hbonds'] > 0) &
+                valid_data_mask
+            )
+        else:
+            filter_mask = (
+                (self.combined_df['confidence_score'] > config['confidence_value']) &
+                (self.combined_df['affinity_pred_value'] < config['affinity_value']) &
+                (self.combined_df['distance_to_residue'] < config['distance_threshold']) &
+                (self.combined_df['num_hbonds'] > 0) &
+                (self.combined_df['affinity_probability_binary'] > config['probability_binary_value']) &
+                valid_data_mask
+            )
         
         filtered_df = self.combined_df[filter_mask]
-        
         filtered_df.to_csv('Final_Filtered_models.csv', index=False)
         logger.info(f"Filtered {len(filtered_df)} models from {valid_data_count} models with complete data")
         logger.info(f"Filter criteria applied:")
@@ -1494,6 +1500,7 @@ def main():
     
     # Start with default config
     config = {
+        'allow_empty_affinity': args.allow_empty_affinity,
         'confidence_value': args.confidence_value,
         'affinity_value': args.affinity_value,
         'probability_binary_value': args.probability_binary_value,
