@@ -1285,10 +1285,10 @@ class BoltzResultsProcessor:
                         col_map[col] = col
 
             residues = [
-                self.config.get('plot_residue1'),
-                self.config.get('plot_residue2'),
-                self.config.get('plot_residue3'),
-                self.config.get('plot_residue4')
+                self.config.get('plot-residue1'),
+                self.config.get('plot-residue2'),
+                self.config.get('plot-residue3'),
+                self.config.get('plot-residue4')
             ]
             residues = [r for r in residues if r is not None]
 
