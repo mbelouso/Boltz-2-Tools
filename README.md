@@ -11,6 +11,8 @@ seaborn
 biopython
 modelcif
 rdkit
+scikit-learn
+iPython
 
 pip install chembl-webresource-client
 
