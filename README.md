@@ -13,6 +13,8 @@ modelcif
 rdkit
 scikit-learn
 iPython
+joblib
+sqlite3
 
 pip install chembl-webresource-client
 
