@@ -1,0 +1,7 @@
+{
+    "confidence_value": 0.85,
+    "affinity_value": -1.5,
+    "probability_binary_value": 0.6,
+    "binding_site_residue1": 83,
+    "distance_threshold": 15.0
+}
