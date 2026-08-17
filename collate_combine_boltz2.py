@@ -1,129 +1,263 @@
 '''
-Program to collate Boltz-2 results: parses confidence/affinity JSON output, computes
-center-of-mass-based distance metrics (distance to ligand, distance to the orthosteric
-binding site) and protein-ligand hydrogen bond counts, and exports a summary CSV.
+Single-file Boltz-2 multi-receptor pipeline: collates each receptor's raw Boltz-2 output
+(confidence/affinity JSON, PDB structures) into a summary CSV, then combines every
+receptor's affinity_pred_value / affinity_probability_binary / confidence_score /
+distance_to_orthosteric_site onto one anchor table (your original, un-filtered ChEMBL
+search-results CSV -- one row per chembl_id). Every compound in --anchor-csv is kept in
+the output, even ones never docked in any receptor (blank columns), and every original
+column of --anchor-csv is preserved.
+
+This file replaces the formerly-separate collate_boltz2.py and combine_results.py --
+there is now only one script to run and maintain. The collation step for each receptor
+still runs as an isolated subprocess (this same script, self-relaunched with an internal
+flag) rather than in-process, purely to preserve the checkpoint/resume behavior described
+below and to keep one receptor's crash from affecting any other. That self-relaunch is
+not something you invoke directly.
 
 Usage:
-python collate_boltz2.py --binding-site-residue1 157 --output-prefix boltz_results
+python collate_combine_boltz2.py --parent-dir /path/to/project --anchor-csv search_results.csv \
+    --receptor-config receptor_config.json --output combined_results.csv
 
-Sample config.json:
+--anchor-csv and --receptor-config are both required -- there is no lightweight "just
+merge pre-existing per-receptor CSVs" mode.
 
-{
-    "binding_site_residue1": 120,
-    "binding_site_residue2": 150,
-    "binding_site_residue3": null,
-    "output_prefix": "boltz_results"
-}
+--receptor-config is a JSON file mapping each receptor prefix to its folder (relative to
+--parent-dir) and binding-site residues. Every entry must have a "folder" key and a
+"binding_site_residue1" key present (the value may be null, but the key itself must be
+there); binding_site_residue2/binding_site_residue3 are optional and may be omitted
+entirely. e.g.:
+    {
+        "M1": {"folder": "M1_MuscarinicSet", "binding_site_residue1": 120, "binding_site_residue2": 150, "binding_site_residue3": null},
+        "M2": {"folder": "M2_MuscarinicSet", "binding_site_residue1": 105}
+    }
 
-The script needs to be run from the Boltz-2 base directory (the directory containing the
-`boltz_results_*` and `yaml*` folders) with the appropriate anaconda environment activated.
-
-Outputs:
-    <output_prefix>_full.csv  - all computed columns (confidence/affinity metrics, SMILES,
-                                 distance_to_ligand_com, distance_to_orthosteric_site, num_hbonds)
-    <output_prefix>.csv       - chembl_id, affinity_pred_value, affinity_probability_binary,
-                                 confidence_score only
+For each receptor folder missing a full-results CSV, this script auto-launches its own
+collation step (unchanged behavior, run as a subprocess inside that receptor's folder),
+up to --max-parallel-receptors at once (default: all pending receptors at once).
+Receptors that already have a full-results CSV are skipped unless --recollate is given.
 
 Checkpointing (for long batch runs over many files, e.g. on an HPC cluster):
-    While the hydrogen-bond and distance calculations run, each model's result is written
-    to a checkpoint CSV as soon as it completes (not just at the end of the run):
+    While the hydrogen-bond and distance calculations run for a receptor, each model's
+    result is written to a checkpoint CSV in that receptor's folder as soon as it
+    completes (not just at the end of the run):
         <output_prefix>_hbonds_checkpoint.csv
         <output_prefix>_distances_checkpoint_<site1>_<site2>_<site3>.csv
-    If the job is killed or crashes partway through (e.g. a SLURM walltime limit), simply
-    re-running the same command resumes from these checkpoints instead of starting over.
-    They are deleted automatically once a run completes successfully. Note the distance
-    checkpoint is keyed by the binding-site residue configuration, since
-    distance_to_orthosteric_site depends on it -- changing --binding-site-residue1/2/3
-    between runs (with the same --output-prefix) starts a fresh checkpoint rather than
-    silently reusing distances computed for a different site.
+    If a receptor's collation is killed or crashes partway through (e.g. a SLURM
+    walltime limit), simply re-running this script resumes that receptor from these
+    checkpoints instead of starting over. They are deleted automatically once that
+    receptor's collation completes successfully. Note the distance checkpoint is keyed
+    by the binding-site residue configuration, since distance_to_orthosteric_site
+    depends on it -- changing binding_site_residue1/2/3 between runs (with the same
+    output-prefix) starts a fresh checkpoint rather than silently reusing distances
+    computed for a different site.
 
+The merged anchor table is written to "<output>_with_anchor.csv" (or --anchor-output).
+
+Optionally pass --input to left-join a subtype-pairs reference table (output of
+filter_searched_results.py's subtype-pairs subcommand: chembl_id, M1_Ki_nm, M1_IC50_nm,
+M1_EC50_nm, ..., M5_EC50_nm) onto the anchor-merged results, keyed on chembl_id. Only
+compounds already in the anchor-merged results are kept. When given, a second file is
+written alongside the anchor output: "<anchor-output>_with_reference.csv" (or the path
+given via --reference-output).
 '''
-
-# Imports
 
 import os
 import re
+import sys
 import csv
-import pandas as pd
 import json
-import numpy as np
-import multiprocessing as mp
 import time
-from functools import partial
+import subprocess
+import argparse
+import logging
+import numpy as np
+import pandas as pd
+import multiprocessing as mp
 from pathlib import Path
 from typing import List, Optional
-import logging
 import biotite.structure as structure
 import biotite.structure.io.pdb as pdb
-import argparse
 import yaml
 
-
-# Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# Columns required in the final, strict-schema output CSV.
+# Columns required in the final, strict-schema per-receptor output CSV.
 FINAL_CSV_COLUMNS = ['chembl_id', 'affinity_pred_value', 'affinity_probability_binary', 'confidence_score']
 
 CHEMBL_ID_PATTERN = re.compile(r'CHEMBL\d+')
 
-# Functions________________________________________
+# The four per-compound summary metrics pulled from each receptor's full-results CSV and
+# left-joined onto the anchor table.
+FULL_METRIC_COLUMNS = [
+    'affinity_pred_value', 'affinity_probability_binary', 'confidence_score', 'distance_to_orthosteric_site'
+]
+
+SELF_SCRIPT = Path(__file__).resolve()
 
 
 def parse_arguments():
     """Parse command line arguments for configuration options."""
     parser = argparse.ArgumentParser(
-        description="Collate Boltz-2 results: parse confidence/affinity data, compute "
-                     "ligand distance and hydrogen bond metrics, and export a summary CSV",
+        description="Collate each receptor's raw Boltz-2 output and combine all receptors' "
+                     "summary metrics onto one anchor (ChEMBL search-results) table",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter
     )
 
     parser.add_argument(
-        '--binding-site-residue1',
-        type=int,
-        default=157,
-        help='Primary binding site (orthosteric site) residue number'
+        '--parent-dir',
+        type=str,
+        default='.',
+        help='Parent directory containing the receptor subfolders named in --receptor-config'
     )
 
     parser.add_argument(
-        '--binding-site-residue2',
-        type=int,
+        '--anchor-csv',
+        type=str,
         default=None,
-        help='Secondary binding site residue number (optional)'
+        help=(
+            'Raw ChEMBL search-results CSV (one row per chembl_id) to use as the base of '
+            'the final table -- every compound in this file is kept in the output (blank '
+            'columns where a receptor has no result). Required.'
+        )
     )
 
     parser.add_argument(
-        '--binding-site-residue3',
-        type=int,
+        '--receptor-config',
+        type=str,
         default=None,
-        help='Tertiary binding site residue number (optional)'
+        help=(
+            'JSON file mapping each receptor prefix (e.g. "M1") to its folder (relative '
+            'to --parent-dir) and binding-site residues: {"M1": {"folder": '
+            '"M1_MuscarinicSet", "binding_site_residue1": 120, "binding_site_residue2": '
+            'null, "binding_site_residue3": null}, ...}. Required. Every entry must have '
+            'a "folder" key and a "binding_site_residue1" key present (value may be '
+            'null). Receptor folders are taken directly from the "folder" entries -- any '
+            'folder-naming convention works.'
+        )
     )
 
     parser.add_argument(
         '--output-prefix',
         type=str,
         default='boltz_results',
-        help='Prefix for output CSV files'
+        help='Output-prefix used for each receptor\'s collation step (must match the prefix already used in each receptor folder, if any)'
     )
 
     parser.add_argument(
-        '--config-file',
+        '--full-results-filename',
         type=str,
-        help='JSON configuration file (overrides command line arguments)'
+        default=None,
+        help=(
+            'Filename (inside each receptor subfolder) holding a receptor\'s full '
+            'collation output (the one with distance_to_orthosteric_site). Defaults to '
+            '"<output-prefix>_full.csv".'
+        )
     )
 
-    return parser.parse_args()
+    parser.add_argument(
+        '--max-parallel-receptors',
+        type=int,
+        default=None,
+        help='Max number of per-receptor collation subprocesses to launch at once. Default: all pending receptors at once.'
+    )
+
+    parser.add_argument(
+        '--recollate',
+        action='store_true',
+        help='Re-run collation even for receptors that already have --full-results-filename'
+    )
+
+    parser.add_argument(
+        '--anchor-output',
+        type=str,
+        default=None,
+        help='Output CSV path for the anchor-merged final table. Defaults to "<output>_with_anchor.csv".'
+    )
+
+    parser.add_argument(
+        '--output',
+        type=str,
+        default='combined_results.csv',
+        help='Used only to derive the default --anchor-output path ("<output>_with_anchor.csv") when --anchor-output is not given'
+    )
+
+    parser.add_argument(
+        '--input',
+        type=str,
+        default=None,
+        help=(
+            'Optional subtype-pairs reference CSV (output of filter_searched_results.py\'s '
+            'subtype-pairs subcommand: chembl_id, M1_Ki_nm, M1_IC50_nm, ..., M5_EC50_nm) to '
+            'left-join onto the anchor-merged results, keyed on chembl_id. When given, a '
+            'second output file (see --reference-output) is written with this data '
+            'attached, in addition to the anchor output file.'
+        )
+    )
+
+    parser.add_argument(
+        '--reference-output',
+        type=str,
+        default=None,
+        help=(
+            'Output CSV path for the anchor-merged results with reference data attached. '
+            'Only used when --input is given. Defaults to "<anchor-output>_with_reference.csv".'
+        )
+    )
+
+    parser.add_argument(
+        '--binding-site-residue1',
+        type=int,
+        default=None,
+        help='Primary binding site (orthosteric site) residue number. Normally set per-receptor via --receptor-config, not passed directly.'
+    )
+
+    parser.add_argument(
+        '--binding-site-residue2',
+        type=int,
+        default=None,
+        help='Secondary binding site residue number (optional). Normally set per-receptor via --receptor-config, not passed directly.'
+    )
+
+    parser.add_argument(
+        '--binding-site-residue3',
+        type=int,
+        default=None,
+        help='Tertiary binding site residue number (optional). Normally set per-receptor via --receptor-config, not passed directly.'
+    )
+
+    # Internal use only: set when this script self-relaunches as a per-receptor collation
+    # subprocess (see build_collate_command/run_collation_stage). Not meant to be passed
+    # directly -- suppressed from --help.
+    parser.add_argument(
+        '--_collate-worker',
+        dest='_collate_worker',
+        action='store_true',
+        help=argparse.SUPPRESS,
+    )
+
+    args = parser.parse_args()
+
+    if not args._collate_worker:
+        missing = [
+            flag for flag, value in [
+                ('--anchor-csv', args.anchor_csv),
+                ('--receptor-config', args.receptor_config),
+            ] if not value
+        ]
+        if missing:
+            parser.error(f"the following arguments are required: {', '.join(missing)}")
+
+    return args
 
 
-def load_config_from_file(config_file):
-    """Load configuration from JSON file."""
-    try:
-        with open(config_file, 'r') as f:
-            return json.load(f)
-    except Exception as e:
-        logger.error(f"Failed to load config file {config_file}: {e}")
-        return {}
+# ============================================================================
+# Collate stage: parses one receptor's raw Boltz-2 output (confidence/affinity JSON +
+# PDB structures) in the current working directory into a summary CSV. Reached only via
+# --_collate-worker, self-relaunched as an isolated subprocess by run_collation_stage
+# below, so its checkpoint/resume behavior and crash isolation are preserved exactly as
+# when this logic lived in a separate collate_boltz2.py script.
+# ============================================================================
 
 
 def get_smiles_from_yaml(base_name):
@@ -141,7 +275,7 @@ def get_smiles_from_yaml(base_name):
                         if ligand and 'smiles' in ligand:
                             return ligand['smiles']
             except Exception as e:
-                print(f"Error reading {yaml_file}: {e}")
+                logger.error(f"Error reading {yaml_file}: {e}")
                 return None
     return None
 
@@ -179,7 +313,7 @@ def parse_boltz2_results(directory):
             affinity_data = json.load(open(os.path.join(directory, aff_file), 'r'))
             affinity_dict[model_key] = affinity_data
         except Exception as e:
-            print(f"Error loading affinity file {aff_file}: {e}")
+            logger.error(f"Error loading affinity file {aff_file}: {e}")
 
     # Process confidence files and merge with affinity data
     for conf_file in confidence_files:
@@ -192,26 +326,37 @@ def parse_boltz2_results(directory):
         try:
             confidence_data = json.load(open(os.path.join(directory, conf_file), 'r'))
         except Exception as e:
-            print(f"Error loading confidence file {conf_file}: {e}")
+            logger.error(f"Error loading confidence file {conf_file}: {e}")
             continue
 
         if os.path.exists(model_path):
-            result_entry = {
-                'model_path': model_path,
-                'model_index': model_index,
-                'chembl_id': extract_chembl_id(base_name),
-                'confidence_score': confidence_data['confidence_score'],
-                'ptm': confidence_data['ptm'],
-                'iptm': confidence_data['iptm'],
-                'ligand_iptm': confidence_data['ligand_iptm'],
-                'protein_iptm': confidence_data['protein_iptm'],
-                'complex_plddt': confidence_data['complex_plddt'],
-                'complex_iplddt': confidence_data['complex_iplddt'],
-                'complex_pde': confidence_data['complex_pde'],
-                'complex_ipde': confidence_data['complex_ipde'],
-                'chains_ptm': confidence_data['chains_ptm'],
-                'pair_chains_iptm': confidence_data['pair_chains_iptm']
-            }
+            # Hard-indexed (not .get()) on purpose: confidence_score is one of the four
+            # required FINAL_CSV_COLUMNS this whole pipeline depends on, so a missing key
+            # should be loud, not silently become None and flow through to the final
+            # results. Scoped to just this model via try/except so one malformed
+            # confidence.json (e.g. a differing Boltz-2 schema version) skips that model
+            # instead of crashing this receptor's entire collation, matching the
+            # log-and-continue handling used for JSON load failures above.
+            try:
+                result_entry = {
+                    'model_path': model_path,
+                    'model_index': model_index,
+                    'chembl_id': extract_chembl_id(base_name),
+                    'confidence_score': confidence_data['confidence_score'],
+                    'ptm': confidence_data['ptm'],
+                    'iptm': confidence_data['iptm'],
+                    'ligand_iptm': confidence_data['ligand_iptm'],
+                    'protein_iptm': confidence_data['protein_iptm'],
+                    'complex_plddt': confidence_data['complex_plddt'],
+                    'complex_iplddt': confidence_data['complex_iplddt'],
+                    'complex_pde': confidence_data['complex_pde'],
+                    'complex_ipde': confidence_data['complex_ipde'],
+                    'chains_ptm': confidence_data['chains_ptm'],
+                    'pair_chains_iptm': confidence_data['pair_chains_iptm']
+                }
+            except KeyError as e:
+                logger.error(f"'{conf_file}' is missing expected key {e} -- skipping this model")
+                continue
 
             # Add affinity data if available for this model
             if model_key in affinity_dict:
@@ -239,9 +384,9 @@ def parse_boltz2_results(directory):
 
             results.append(result_entry)
         else:
-            print(f"Model file does not exist: {model_path}")
+            logger.warning(f"Model file does not exist: {model_path}")
 
-    print(f"Affinity data matched for {sum(1 for r in results if r.get('affinity_pred_value') is not None)} models")
+    logger.info(f"Affinity data matched for {sum(1 for r in results if r.get('affinity_pred_value') is not None)} models")
 
     return pd.DataFrame(results)
 
@@ -260,23 +405,31 @@ def calculate_orthosteric_distance(distances, site1, site2=None, site3=None) -> 
     function — now returns the averaged distance value instead of a pass/fail bool).
 
     Parameters:
-    distances (np.array): per-residue CA-to-ligand-COM distances, indexed by residue position
-    site1, site2, site3 (int): residue position(s) to average over (site2/site3 optional)
+    distances (dict): {residue_id: CA-to-ligand-COM distance}, from
+        calculate_distances_to_com. Keyed by each CA atom's actual PDB residue ID
+        (1-based, matching what --binding-site-residue1/2/3 and ChimeraX/PyMOL show),
+        not its positional index into the CA array -- indexing the raw array directly by
+        residue number would be off by one, since PDB residue numbering starts at 1 but
+        array indices start at 0.
+    site1, site2, site3 (int): residue ID(s) to average over (site2/site3 optional)
 
     Returns: the averaged distance (float), or None if distances is empty/None, site1 is
-    None, or a configured site index is out of range for the array.
+    None, or a configured residue ID isn't present in distances.
     """
-    if distances is None or len(distances) == 0 or site1 is None:
+    if not distances or site1 is None:
         return None
 
     sites = [s for s in (site1, site2, site3) if s is not None]
 
-    try:
-        site_distances = np.array([distances[s] for s in sites])
-    except IndexError:
-        logger.warning(f"Binding site residue index out of range for distances array of length {len(distances)}")
+    missing = [s for s in sites if s not in distances]
+    if missing:
+        logger.warning(
+            f"Binding site residue ID(s) {missing} not found among this model's CA atoms "
+            f"(res_id range {min(distances)}-{max(distances)})"
+        )
         return None
 
+    site_distances = np.array([distances[s] for s in sites])
     return float(np.mean(site_distances))
 
 
@@ -336,12 +489,14 @@ def calculate_center_of_mass(atoms):
 
 # Calculate the distances between the CA atoms in chain A and the center of mass of chain B
 def calculate_distances_to_com(ca_atoms, com):
-    """Calculate distances from CA atoms to a given center of mass."""
+    """Calculate each CA atom's distance to a given center of mass, keyed by that atom's
+    actual PDB residue ID (res_id) rather than its positional index in ca_atoms -- see
+    calculate_orthosteric_distance for why that distinction matters."""
     if com is None or len(ca_atoms) == 0:
         return None
     ca_positions = ca_atoms.coord  # Use .coord instead of .get_positions()
     distances = np.linalg.norm(ca_positions - com, axis=1)
-    return distances
+    return dict(zip(ca_atoms.res_id.tolist(), distances.tolist()))
 
 
 # Hydrogen Bond Calculation Functions
@@ -506,7 +661,7 @@ def analyze_hydrogen_bonds(chain_a_atoms, chain_b_atoms, distance_cutoff=3.5):
         chain_a_atoms, chain_b_atoms, distance_cutoff
     )
 
-    print(f"\nFound {len(hbonds)} potential hydrogen bonds (heavy atom distance < {distance_cutoff} Å)")
+    logger.info(f"Found {len(hbonds)} potential hydrogen bonds (heavy atom distance < {distance_cutoff} Å)")
     return len(hbonds), bond_details
 
 def process_hydrogen_bonds(file_path):
@@ -531,7 +686,7 @@ def process_hydrogen_bonds(file_path):
     except Exception as e:
         # Broad except: in a long unattended batch run over thousands of files, one
         # malformed/corrupt PDB should not take down the whole pool.
-        print(f"Error processing file {file_path}: {e}")
+        logger.error(f"Error processing file {file_path}: {e}")
         return None
 
 
@@ -573,7 +728,7 @@ def process_model_geometry(file_path, site1=None, site2=None, site3=None):
             'distance_to_orthosteric_site': distance_to_orthosteric_site,
         }
     except Exception as e:
-        print(f"Error processing file {file_path}: {e}")
+        logger.error(f"Error processing file {file_path}: {e}")
         return None
 
 
@@ -590,12 +745,10 @@ def _geometry_worker(args):
     return process_model_geometry(file_path, site1, site2, site3)
 
 
-# End of Functions________________________________________
-
-
 class BoltzCollator:
-    """Main class for collating Boltz-2 results: parses confidence/affinity data, computes
-    ligand distance and hydrogen bond metrics, and exports the summary CSVs."""
+    """Main class for collating one receptor's Boltz-2 results: parses confidence/affinity
+    data, computes ligand distance and hydrogen bond metrics, and exports the summary
+    CSVs."""
 
     def __init__(self, config: dict):
         self.config = config
@@ -895,10 +1048,10 @@ class BoltzCollator:
             checkpoint_file.unlink()
 
 
-def main():
-    """Main execution function."""
-    args = parse_arguments()
-
+def run_collate_worker(args) -> None:
+    """Reached only via the internal self-relaunch (--_collate-worker). Runs the
+    collation pipeline unchanged inside the receptor folder set as this process's cwd by
+    subprocess.Popen(cwd=folder, ...) in run_collation_stage below."""
     config = {
         'binding_site_residue1': args.binding_site_residue1,
         'binding_site_residue2': args.binding_site_residue2,
@@ -906,16 +1059,328 @@ def main():
         'output_prefix': args.output_prefix,
     }
 
-    if args.config_file:
-        file_config = load_config_from_file(args.config_file)
-        config.update(file_config)
-
     logger.info("Configuration:")
     for key, value in config.items():
         logger.info(f"  {key}: {value}")
 
     collator = BoltzCollator(config)
     collator.run_collation()
+
+
+# ============================================================================
+# Orchestrator stage: for each configured receptor, launches the collate stage above (if
+# needed) as a subprocess, then combines every receptor's summary metrics onto one
+# anchor (ChEMBL search-results) table.
+# ============================================================================
+
+
+def receptor_folders_from_config(parent_dir: Path, receptor_config: dict) -> dict:
+    """Build receptor prefix -> folder path directly from --receptor-config's "folder"
+    entries. Lets receptors use any folder-naming convention -- no shared prefix pattern
+    required. A receptor with a missing/empty "folder" value, or whose folder doesn't
+    exist under parent_dir, is logged and skipped."""
+    receptor_folders = {}
+    for receptor, site_config in receptor_config.items():
+        folder_name = site_config.get('folder')
+        if not folder_name:
+            logger.error(f"No \"folder\" entry for receptor '{receptor}' in --receptor-config -- skipping")
+            continue
+
+        folder_path = parent_dir / folder_name
+        if not folder_path.is_dir():
+            logger.warning(f"{receptor}: configured folder '{folder_path}' does not exist -- skipping")
+            continue
+
+        receptor_folders[receptor] = folder_path
+
+    return receptor_folders
+
+
+def _receptor_sort_key(receptor: str) -> tuple:
+    """Sort key for receptor prefixes: those containing a number (M1, M2, M10, ...) sort
+    numerically by it; prefixes with no digit at all (possible via --receptor-config's
+    arbitrary keys) sort after all numeric ones, alphabetically among themselves -- unlike
+    a bare int(re.search(r'\\d+', r).group()), this never raises."""
+    match = re.search(r'\d+', receptor)
+    if match:
+        return (0, int(match.group()), receptor)
+    return (1, 0, receptor)
+
+
+def load_receptor_config(config_path: str) -> dict:
+    """Load the receptor-prefix -> folder/binding-site-residue mapping (see
+    --receptor-config)."""
+    with open(config_path, 'r') as f:
+        return json.load(f)
+
+
+def validate_receptor_config(receptor_config: dict) -> None:
+    """Fail fast if any --receptor-config entry is missing a required key. Checks key
+    *presence*, not truthiness -- binding_site_residue1: null is a valid, deliberate
+    value (this receptor has no orthosteric-distance residue), but the key must exist so
+    every entry visibly documents its residue config. Raises with every problem found
+    across every receptor at once, not just the first, so a user fixing the JSON doesn't
+    have to re-run repeatedly to discover each error one at a time."""
+    problems = []
+    for receptor, site_config in receptor_config.items():
+        if not isinstance(site_config, dict):
+            problems.append(f"{receptor}: entry is not a JSON object")
+            continue
+        if 'folder' not in site_config:
+            problems.append(f"{receptor}: missing required \"folder\" key")
+        if 'binding_site_residue1' not in site_config:
+            problems.append(
+                f"{receptor}: missing required \"binding_site_residue1\" key "
+                f"(value may be null, but the key must be present)"
+            )
+
+    if problems:
+        raise ValueError("Invalid --receptor-config:\n  " + "\n  ".join(problems))
+
+
+def build_collate_command(output_prefix: str, site_config: dict) -> list:
+    """Build the self-relaunch CLI invocation for one receptor's binding-site config.
+    --_collate-worker switches the relaunched process into collate-worker mode instead
+    of normal orchestrator mode (see parse_arguments/main)."""
+    cmd = [sys.executable, str(SELF_SCRIPT), '--_collate-worker', '--output-prefix', output_prefix]
+    for flag, key in [
+        ('--binding-site-residue1', 'binding_site_residue1'),
+        ('--binding-site-residue2', 'binding_site_residue2'),
+        ('--binding-site-residue3', 'binding_site_residue3'),
+    ]:
+        value = site_config.get(key)
+        if value is not None:
+            cmd += [flag, str(value)]
+    return cmd
+
+
+def run_collation_stage(
+    receptor_folders: dict,
+    receptor_config: dict,
+    output_prefix: str,
+    full_results_filename: str,
+    max_parallel: Optional[int],
+    recollate: bool,
+) -> None:
+    """Auto-run the collate stage (self-relaunched as a subprocess) for any receptor
+    folder missing full_results_filename, up to max_parallel at once. Each run's
+    stdout/stderr is captured to '<folder>/<output_prefix>_collate.log'. A receptor with
+    no entry in receptor_config, or whose subprocess fails, is logged and skipped -- it
+    just won't have columns in the final table (matching this module's existing
+    tolerance for missing receptor data)."""
+    pending = [
+        (receptor, folder) for receptor, folder in receptor_folders.items()
+        if recollate or not (folder / full_results_filename).exists()
+    ]
+    if not pending:
+        logger.info("All receptors already collated -- nothing to launch")
+        return
+
+    if max_parallel is None:
+        max_parallel = len(pending)
+    logger.info(f"Launching collation for {len(pending)} receptor(s), up to {max_parallel} at once")
+
+    remaining = list(pending)
+    running = {}  # receptor -> (Popen, log file handle, folder)
+
+    while remaining or running:
+        while remaining and len(running) < max_parallel:
+            receptor, folder = remaining.pop(0)
+            site_config = receptor_config.get(receptor)
+            if site_config is None:
+                logger.error(f"No binding-site config for receptor '{receptor}' in --receptor-config -- skipping")
+                continue
+
+            cmd = build_collate_command(output_prefix, site_config)
+            log_path = folder / f"{output_prefix}_collate.log"
+            log_fh = open(log_path, 'w')
+            logger.info(f"{receptor}: launching '{' '.join(cmd)}' in {folder} (log: {log_path})")
+            proc = subprocess.Popen(cmd, cwd=folder, stdout=log_fh, stderr=subprocess.STDOUT)
+            running[receptor] = (proc, log_fh, folder)
+
+        for receptor in list(running.keys()):
+            proc, log_fh, folder = running[receptor]
+            if proc.poll() is None:
+                continue
+            log_fh.close()
+            if proc.returncode == 0:
+                logger.info(f"{receptor}: collation finished successfully")
+            else:
+                logger.error(
+                    f"{receptor}: collation exited with code {proc.returncode} "
+                    f"-- see {folder / f'{output_prefix}_collate.log'}"
+                )
+            del running[receptor]
+
+        if running:
+            time.sleep(2)
+
+
+def load_receptor_full_metrics(receptor: str, folder: Path, full_results_filename: str) -> pd.DataFrame:
+    """Load one receptor's full collation output, keep only chembl_id + the four
+    per-compound summary metrics, and prefix them with the receptor name."""
+    csv_path = folder / full_results_filename
+    if not csv_path.exists():
+        logger.warning(f"No '{full_results_filename}' found in {folder}, skipping receptor {receptor}")
+        return None
+
+    df = pd.read_csv(csv_path)
+
+    if 'chembl_id' not in df.columns:
+        logger.error(f"'{csv_path}' has no chembl_id column, skipping receptor {receptor}")
+        return None
+
+    missing_metrics = [c for c in FULL_METRIC_COLUMNS if c not in df.columns]
+    if missing_metrics:
+        logger.error(f"'{csv_path}' is missing columns {missing_metrics}, skipping receptor {receptor}")
+        return None
+
+    df = df[['chembl_id'] + FULL_METRIC_COLUMNS]
+
+    duplicate_count = df['chembl_id'].duplicated().sum()
+    if duplicate_count > 0:
+        logger.warning(
+            f"{receptor}: {duplicate_count} duplicate chembl_id rows in '{csv_path}' "
+            f"(likely multiple models per compound) -- keeping the first row per chembl_id"
+        )
+        df = df.drop_duplicates(subset='chembl_id', keep='first')
+
+    df = df.rename(columns={col: f"{receptor}_{col}" for col in FULL_METRIC_COLUMNS})
+
+    logger.info(f"{receptor}: loaded {len(df)} compounds' metrics from {csv_path}")
+    return df
+
+
+def combine_receptor_metrics(receptor_folders: dict, full_results_filename: str) -> pd.DataFrame:
+    """Outer-merge each receptor's four summary metrics (from load_receptor_full_metrics) on chembl_id."""
+    ordered_receptors = sorted(receptor_folders.keys(), key=_receptor_sort_key)
+
+    combined_df = None
+    receptors_used = []
+
+    for receptor in ordered_receptors:
+        receptor_df = load_receptor_full_metrics(receptor, receptor_folders[receptor], full_results_filename)
+        if receptor_df is None:
+            continue
+
+        receptors_used.append(receptor)
+        if combined_df is None:
+            combined_df = receptor_df
+        else:
+            combined_df = pd.merge(combined_df, receptor_df, on='chembl_id', how='outer')
+
+    if combined_df is None:
+        raise ValueError("No receptor full-results were successfully loaded")
+
+    logger.info(
+        f"Combined metrics for {len(combined_df)} compounds across {len(receptors_used)} receptors: {receptors_used}"
+    )
+    return combined_df
+
+
+def attach_to_anchor(anchor_df: pd.DataFrame, receptor_metrics_df: pd.DataFrame) -> pd.DataFrame:
+    """Left-merge per-receptor metrics onto the anchor table, keyed on chembl_id. Every
+    anchor compound is kept -- even ones never docked in any receptor -- with the new
+    columns left blank/NaN where there's no match."""
+    before = len(anchor_df)
+    merged = pd.merge(anchor_df, receptor_metrics_df, on='chembl_id', how='left')
+
+    new_columns = [col for col in receptor_metrics_df.columns if col != 'chembl_id']
+    matched = merged[new_columns].notna().any(axis=1).sum() if new_columns else 0
+    logger.info(f"Attached receptor metrics: {matched}/{before} anchor compounds matched at least one receptor")
+
+    return merged
+
+
+def load_reference_data(reference_csv: str) -> pd.DataFrame:
+    """Load a CSV with a chembl_id column (used for both --anchor-csv and the --input
+    subtype-pairs reference table), deduping on chembl_id if needed."""
+    df = pd.read_csv(reference_csv)
+
+    if 'chembl_id' not in df.columns:
+        raise ValueError(f"'{reference_csv}' has no chembl_id column")
+
+    duplicate_count = df['chembl_id'].duplicated().sum()
+    if duplicate_count > 0:
+        logger.warning(
+            f"'{reference_csv}': {duplicate_count} duplicate chembl_id rows "
+            f"-- keeping the first row per chembl_id"
+        )
+        df = df.drop_duplicates(subset='chembl_id', keep='first')
+
+    logger.info(f"Loaded {len(df)} compounds from '{reference_csv}'")
+    return df
+
+
+def attach_reference_data(combined_df: pd.DataFrame, reference_csv: str) -> pd.DataFrame:
+    """Left-merge the --input subtype-pairs reference data onto combined_df, keyed on
+    chembl_id. Compounds only present in the reference CSV are dropped; compounds with
+    no reference match get NaN in the new columns."""
+    reference_df = load_reference_data(reference_csv)
+    before = len(combined_df)
+    merged = pd.merge(combined_df, reference_df, on='chembl_id', how='left')
+
+    new_columns = [col for col in reference_df.columns if col != 'chembl_id']
+    matched = merged[new_columns].notna().any(axis=1).sum() if new_columns else 0
+    logger.info(f"Attached reference data: {matched}/{before} compounds matched in '{reference_csv}'")
+
+    return merged
+
+
+def run_pipeline(args, receptor_config: dict) -> None:
+    """Combine each receptor's affinity/confidence/orthosteric-distance metrics
+    (auto-launching collation per receptor as needed) and left-merge them onto the full
+    anchor (original search-results) table."""
+    parent_path = Path(args.parent_dir)
+    receptor_folders = receptor_folders_from_config(parent_path, receptor_config)
+
+    if not receptor_folders:
+        raise ValueError(f"No receptor folders found under {args.parent_dir}")
+
+    ordered_receptors = sorted(receptor_folders.keys(), key=_receptor_sort_key)
+    logger.info(f"Found {len(ordered_receptors)} receptor folders: {ordered_receptors}")
+
+    full_results_filename = args.full_results_filename or f"{args.output_prefix}_full.csv"
+
+    run_collation_stage(
+        receptor_folders, receptor_config, args.output_prefix,
+        full_results_filename, args.max_parallel_receptors, args.recollate
+    )
+
+    receptor_metrics_df = combine_receptor_metrics(receptor_folders, full_results_filename)
+    anchor_df = load_reference_data(args.anchor_csv)
+    final_df = attach_to_anchor(anchor_df, receptor_metrics_df)
+
+    anchor_output = args.anchor_output
+    if anchor_output is None:
+        output_path = Path(args.output)
+        anchor_output = str(output_path.with_name(f"{output_path.stem}_with_anchor{output_path.suffix}"))
+
+    final_df.to_csv(anchor_output, index=False)
+    logger.info(f"Final anchor-merged table exported to '{anchor_output}' ({len(final_df)} compounds)")
+
+    if args.input:
+        reference_output = args.reference_output
+        if reference_output is None:
+            anchor_output_path = Path(anchor_output)
+            reference_output = str(anchor_output_path.with_name(f"{anchor_output_path.stem}_with_reference{anchor_output_path.suffix}"))
+
+        with_reference_df = attach_reference_data(final_df, args.input)
+        with_reference_df.to_csv(reference_output, index=False)
+        logger.info(f"Anchor-merged results with reference data exported to '{reference_output}'")
+
+
+def main():
+    """Main execution function."""
+    args = parse_arguments()
+
+    if args._collate_worker:
+        run_collate_worker(args)
+        return
+
+    receptor_config = load_receptor_config(args.receptor_config)
+    validate_receptor_config(receptor_config)
+    run_pipeline(args, receptor_config)
 
 
 if __name__ == "__main__":

@@ -1,0 +1,22 @@
+{
+    "M1": {
+        "folder": "REPLACE_WITH_M1_FOLDER_NAME",
+        "binding_site_residue1": 999
+    },
+    "M2": {
+        "folder": "REPLACE_WITH_M2_FOLDER_NAME",
+        "binding_site_residue1": 999
+    },
+    "M3": {
+        "folder": "REPLACE_WITH_M3_FOLDER_NAME",
+        "binding_site_residue1": 999
+    },
+    "M4": {
+        "folder": "REPLACE_WITH_M4_FOLDER_NAME",
+        "binding_site_residue1": 999
+    },
+    "M5": {
+        "folder": "REPLACE_WITH_M5_FOLDER_NAME",
+        "binding_site_residue1": 999
+    }
+}

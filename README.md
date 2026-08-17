@@ -14,20 +14,27 @@ Install core scientific packages with conda:
 
 ```bash
 conda install -y -c conda-forge \
-	pandas pyyaml numpy matplotlib seaborn biopython modelcif rdkit scikit-learn ipython joblib
+	pandas pyyaml numpy scipy statsmodels matplotlib seaborn biopython modelcif rdkit scikit-learn ipython joblib pyqt
 ```
 
-Install the ChEMBL client with pip:
+Install the ChEMBL client and superqt (range-slider filter widgets for the GUI) with pip:
 
 ```bash
-pip install chembl-webresource-client
+pip install chembl-webresource-client superqt
 ```
 
 Optional quick check:
 
 ```bash
-python -c "import pandas, yaml, numpy, matplotlib, seaborn, Bio, modelcif, rdkit, sklearn, joblib; print('Environment OK')"
+python -c "import pandas, yaml, numpy, scipy, statsmodels, matplotlib, seaborn, Bio, modelcif, rdkit, sklearn, joblib, PyQt6, superqt; print('Environment OK')"
 ```
+
+Notes on the above:
+- `scipy` and `statsmodels` are required by `correlate_data.py` (regression/statistics,
+  including the optional weighted/WLS regression fit).
+- `pyqt` (conda-forge's PyQt6 package) and `superqt` (pip) are only required to run
+  `correlate_data_gui.py`; the CLI tools (`correlate_data.py`, `collate_combine_boltz2.py`,
+  `Filter_Boltz2.py`) don't need them.
 
 Notes:
 - `sqlite3` is part of the Python standard library and does not need a separate install.

@@ -17,7 +17,7 @@ subtype-pairs
     Takes a ChEMBL per-activity-type reference CSV, the raw pre-rename format with the
     merge "_y" suffix still on the value columns (chembl_id, best_ki_nm_y, Ki_uniprot,
     best_ic50_nm_y, IC50_uniprot, best_ec50_nm_y, EC50_uniprot, ... -- see
-    combine_results.py's REFERENCE_COLUMNS_RENAME for the same column mapping) and, for
+    collate_combine_boltz2.py's REFERENCE_COLUMNS_RENAME for the same column mapping) and, for
     each activity type (Ki / IC50 / EC50):
         1. takes compounds that have a value for that activity type (best_X_y not null)
         2. checks the target it was measured against (the X_uniprot column)
@@ -98,7 +98,7 @@ SUBTYPE_ORDER = ['M1', 'M2', 'M3', 'M4', 'M5']
 
 # Activity type -> (best-value column, target-uniprot column) in the reference CSV.
 # The value columns keep the raw "_y" merge-suffix (e.g. best_ic50_nm_y) as produced
-# by the original ChEMBL retrieval pipeline -- see combine_results.py's
+# by the original ChEMBL retrieval pipeline -- see collate_combine_boltz2.py's
 # REFERENCE_COLUMNS_RENAME for the same mapping.
 ACTIVITY_COLUMNS = {
     'Ki': ('best_ki_nm_y', 'Ki_uniprot'),
